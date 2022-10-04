@@ -34,13 +34,52 @@
 using std::placeholders::_1;
 std::mutex mtx;
 
-#define MAP_SIZE 1500 // will +1 for making origin
+#define MAP_SIZE 1400 // will +1 for making origin
 #define MAP_RESOLUTION 0.05
 #define NUM_PARTICLES 1 //175
 #define X_VARIANCE 0.0 //0.01
 #define Y_VARIANCE 0.0 //0.01
 #define THETA_VARIANCE 0.0 //0.0325
 #define NEFF_THRESH 140.0 // less than this will trigger resample
+
+// <x, y>
+void bresenham2d(std::pair<std::pair<double, double>, std::pair<double, double>> theData, std::vector<std::pair<int, int>> *theVector) {
+	int y1, x1, y2, x2;
+	int dx, dy, sx, sy;
+	int e2;
+	int error;
+
+	x1 = int(theData.first.first);
+	y1 = int(theData.first.second);
+	x2 = int(theData.second.first);
+	y2 = int(theData.second.second);
+
+	dx = abs(x1 - x2);
+	dy = -abs(y1 - y2);
+
+	sx = x1 < x2 ? 1 : -1;
+	sy = y1 < y2 ? 1 : -1;
+
+	error = dx + dy;
+
+	while (1) {
+		theVector->push_back(std::pair<int, int>(x1, y1));
+		if (x1 == x2 && y1 == y2)
+			break;
+		e2 = 2 * error;
+
+		if (e2 >= dy) {
+			if (x2 == x1) break;
+			error = error + dy;
+			x1 = x1 + sx;
+		}
+		if (e2 <= dx) {
+			if (y2 == y1) break;
+			error = error + dx;
+			y1 = y1 + sy;
+		}
+	}
+}
 
 Eigen::MatrixXd frame_transformation(Eigen::MatrixXd& T, Eigen::MatrixXd& x){
 	// T is 4 by 4
@@ -82,8 +121,8 @@ protected:
 	rclcpp::Time last_step_time_;
 	bool Lidar_Valid;
 	bool firstScan;
-	cv::Mat Map = cv::Mat(MAP_SIZE+1, MAP_SIZE+1, CV_32FC1, cv::Scalar(0)); // each grid length 0.1 m
-	cv::Mat Trajectory_Map = cv::Mat(MAP_SIZE+1, MAP_SIZE+1, CV_8UC3, cv::Scalar(0, 0, 0)); // each grid length 0.1 m
+	cv::Mat Map = cv::Mat(MAP_SIZE+1, MAP_SIZE+1, CV_32FC1, cv::Scalar(0)); // each grid length MAP_RESOLUTION m
+	cv::Mat Trajectory_Map = cv::Mat(MAP_SIZE+1, MAP_SIZE+1, CV_8UC3, cv::Scalar(0, 0, 0)); // each grid length MAP_RESOLUTION m
 	double log_odds_map[MAP_SIZE + 1][MAP_SIZE + 1] = {};
 	double Map_resolution = MAP_RESOLUTION;
 	Eigen::MatrixXd x = Eigen::MatrixXd::Zero(3,NUM_PARTICLES); // x,y,theta in world frame, initially 0
@@ -141,7 +180,7 @@ public:
 
 		declare_parameter("map_publisher_freq", 10);
         get_parameter("map_publisher_freq", this->map_publisher_freq);
-		declare_parameter("dt", 0.065);
+		declare_parameter("dt", 0.02);
 		get_parameter("dt", this->dt_);
 
 		// initialize the member publisher
@@ -227,8 +266,8 @@ public:
 
             for(int i = 0; i < Lidar_measurement.point_num; ++i){
                 if(Lidar_measurement.points[i].x != 0 || Lidar_measurement.points[i].y != 0 || Lidar_measurement.points[i].z != 0){
-                    if(Lidar_measurement.points[i].z <= 3 && Lidar_measurement.points[i].z >= -3){
-                        if(Lidar_measurement.points[i].x <= 37.5 && Lidar_measurement.points[i].x >= -37.5 && Lidar_measurement.points[i].y <= 37.5 && Lidar_measurement.points[i].y >= -37.5){
+                    if(Lidar_measurement.points[i].z <= 10 && Lidar_measurement.points[i].z >= -10){
+                        if(Lidar_measurement.points[i].x <= 35 && Lidar_measurement.points[i].x >= -35 && Lidar_measurement.points[i].y <= 35 && Lidar_measurement.points[i].y >= -35){
                             std::cout << "x: " << Lidar_measurement.points[i].x << std::endl;
                             std::cout << "y: " << Lidar_measurement.points[i].y << std::endl;
                             std::cout << "z: " << Lidar_measurement.points[i].z << std::endl;
