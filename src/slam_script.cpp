@@ -268,9 +268,9 @@ public:
                 if(Lidar_measurement.points[i].x != 0 || Lidar_measurement.points[i].y != 0 || Lidar_measurement.points[i].z != 0){
                     if(Lidar_measurement.points[i].z <= 5 && Lidar_measurement.points[i].z >= -5){
                         if(Lidar_measurement.points[i].x <= 10 && Lidar_measurement.points[i].x >= -10 && Lidar_measurement.points[i].y <= 10 && Lidar_measurement.points[i].y >= -10){
-                            std::cout << "x: " << Lidar_measurement.points[i].x << std::endl;
-                            std::cout << "y: " << Lidar_measurement.points[i].y << std::endl;
-                            std::cout << "z: " << Lidar_measurement.points[i].z << std::endl;
+                            //std::cout << "x: " << Lidar_measurement.points[i].x << std::endl;
+                            //std::cout << "y: " << Lidar_measurement.points[i].y << std::endl;
+                            //std::cout << "z: " << Lidar_measurement.points[i].z << std::endl;
 
                             Eigen::MatrixXd x_coord = Eigen::MatrixXd::Zero(2,1);
                             x_coord(0,0) = Lidar_measurement.points[i].x;
