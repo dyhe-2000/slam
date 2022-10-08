@@ -180,7 +180,7 @@ public:
 
 		declare_parameter("map_publisher_freq", 10);
         get_parameter("map_publisher_freq", this->map_publisher_freq);
-		declare_parameter("dt", 0.02);
+		declare_parameter("dt", 0.005);
 		get_parameter("dt", this->dt_);
 
 		// initialize the member publisher
