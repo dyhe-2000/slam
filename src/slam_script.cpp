@@ -34,7 +34,7 @@
 using std::placeholders::_1;
 std::mutex mtx;
 
-#define MAP_SIZE 1400 // will +1 for making origin
+#define MAP_SIZE 400 // will +1 for making origin
 #define MAP_RESOLUTION 0.05
 #define NUM_PARTICLES 1 //175
 #define X_VARIANCE 0.0 //0.01
@@ -267,7 +267,7 @@ public:
             for(int i = 0; i < Lidar_measurement.point_num; ++i){
                 if(Lidar_measurement.points[i].x != 0 || Lidar_measurement.points[i].y != 0 || Lidar_measurement.points[i].z != 0){
                     if(Lidar_measurement.points[i].z <= 10 && Lidar_measurement.points[i].z >= -10){
-                        if(Lidar_measurement.points[i].x <= 35 && Lidar_measurement.points[i].x >= -35 && Lidar_measurement.points[i].y <= 35 && Lidar_measurement.points[i].y >= -35){
+                        if(Lidar_measurement.points[i].x <= 10 && Lidar_measurement.points[i].x >= -10 && Lidar_measurement.points[i].y <= 10 && Lidar_measurement.points[i].y >= -10){
                             std::cout << "x: " << Lidar_measurement.points[i].x << std::endl;
                             std::cout << "y: " << Lidar_measurement.points[i].y << std::endl;
                             std::cout << "z: " << Lidar_measurement.points[i].z << std::endl;
