@@ -31,16 +31,38 @@
 #include <fstream>
 #include <random>
 #include <time.h>
+#include "GeographicLib/Geocentric.hpp"
+#include "GeographicLib/LocalCartesian.hpp"
 using std::placeholders::_1;
 std::mutex mtx;
 
-#define MAP_SIZE 400 // will +1 for making origin
+#define MAP_SIZE 800 // will +1 for making origin
 #define MAP_RESOLUTION 0.05
 #define NUM_PARTICLES 1 //175
 #define X_VARIANCE 0.0 //0.01
 #define Y_VARIANCE 0.0 //0.01
 #define THETA_VARIANCE 0.0 //0.0325
 #define NEFF_THRESH 140.0 // less than this will trigger resample
+
+struct GpsPosition{
+  double latitude;
+  double longitude;
+  double altitude;
+};
+
+struct Position3d{
+  double x;
+  double y;
+  double z;
+};
+
+Position3d to_enu(GpsPosition const & target, GpsPosition const & origin){
+  const GeographicLib::Geocentric & earth = GeographicLib::Geocentric::WGS84();
+  GeographicLib::LocalCartesian proj(origin.latitude, origin.longitude, origin.altitude, earth);
+  Position3d out = Position3d();
+  proj.Forward(target.latitude, target.longitude, target.altitude, out.x, out.y, out.z);
+  return out;
+}
 
 // <x, y>
 void bresenham2d(std::pair<std::pair<double, double>, std::pair<double, double>> theData, std::vector<std::pair<int, int>> *theVector) {
@@ -132,14 +154,20 @@ protected:
 	rclcpp::Time previous_read_imu_message_time_stamp;
 	long long int step_counter;
 	geometry_msgs::msg::Vector3 coord_message; 
+	GpsPosition origin;
+	bool origin_is_set;
 
 	// msg struct
 	livox_interfaces::msg::CustomMsg Lidar_measurement;
     std_msgs::msg::Float64 Lat_measurement;
+	std_msgs::msg::Float64 Long_measurement;
+	std_msgs::msg::Float64 Heading_measurement;
 
 	// buffer subscriber
 	MsgSubscriber<livox_interfaces::msg::CustomMsg>::UniquePtr lidar_sub;
     MsgSubscriber<std_msgs::msg::Float64>::UniquePtr lat_sub;
+	MsgSubscriber<std_msgs::msg::Float64>::UniquePtr long_sub;
+	MsgSubscriber<std_msgs::msg::Float64>::UniquePtr heading_sub;
 public:
 	explicit slam_node(const rclcpp::NodeOptions & options): Node("slam_node", options) {
 		std::cout << "this is boat project slam node" << std::endl;
@@ -183,6 +211,30 @@ public:
 		declare_parameter("dt", 0.005);
 		get_parameter("dt", this->dt_);
 
+		// initialize origin not defined yet, first set of gps will define origin
+		origin_is_set = false;
+
+		mtx.lock();
+		// clear trajectory map
+		uint8_t* Trajectory_Map_pixel_ptr = (uint8_t*)Trajectory_Map.data;
+		int cn = Trajectory_Map.channels();
+		for(int i = 0; i < MAP_SIZE+1; ++i){
+			for(int j = 0; j < MAP_SIZE+1; ++j){
+				Trajectory_Map_pixel_ptr[i*Trajectory_Map.cols*cn + j*cn + 0] = 0; // B
+				Trajectory_Map_pixel_ptr[i*Trajectory_Map.cols*cn + j*cn + 1] = 0; // G
+				Trajectory_Map_pixel_ptr[i*Trajectory_Map.cols*cn + j*cn + 2] = 0; // R
+			}
+		}
+
+		// clear map
+		float* Map_pixel_ptr = (float*)Map.data;
+		for(int j = 0; j < MAP_SIZE+1; ++j){
+			for(int k = 0; k < MAP_SIZE+1; ++k){
+				Map_pixel_ptr[j*Map.cols + k] = 0.0;
+			}
+		}
+		mtx.unlock();
+
 		// initialize the member publisher
 		this->img_pub_ = this->create_publisher<sensor_msgs::msg::Image>("slam_map", 10);
 		this->trajectory_map_pub_ = this->create_publisher<sensor_msgs::msg::Image>("slam_trajectory_map", 10);
@@ -191,6 +243,8 @@ public:
 		// initialize the buffer subscribers
 		subscribe_from(this, lidar_sub, "/livox/lidar");
         subscribe_from(this, lat_sub, "/wamv/sensors/gps/lat");
+		subscribe_from(this, long_sub, "/wamv/sensors/gps/lon");
+		subscribe_from(this, heading_sub, "/wamv/sensors/gps/hdg");
 
 		// project first lidar measurement, in this case wTb is identity matrix because initially body frame is world frame
 		this->map_sending_timer_ = this->create_wall_timer(std::chrono::milliseconds((uint32_t)(1.0/this->map_publisher_freq*1000)), std::bind(&slam_node::publish_map, this));
@@ -266,8 +320,8 @@ public:
 
             for(int i = 0; i < Lidar_measurement.point_num; ++i){
                 if(Lidar_measurement.points[i].x != 0 || Lidar_measurement.points[i].y != 0 || Lidar_measurement.points[i].z != 0){
-                    if(Lidar_measurement.points[i].z <= 0.6 && Lidar_measurement.points[i].z >= -0.6){
-                        if(Lidar_measurement.points[i].x <= 10 && Lidar_measurement.points[i].x >= -10 && Lidar_measurement.points[i].y <= 10 && Lidar_measurement.points[i].y >= -10){
+                    if(Lidar_measurement.points[i].z <= 1 && Lidar_measurement.points[i].z >= -1){
+                        if(Lidar_measurement.points[i].x <= 20 && Lidar_measurement.points[i].x >= -20 && Lidar_measurement.points[i].y <= 20 && Lidar_measurement.points[i].y >= -20){
                             //std::cout << "x: " << Lidar_measurement.points[i].x << std::endl;
                             //std::cout << "y: " << Lidar_measurement.points[i].y << std::endl;
                             //std::cout << "z: " << Lidar_measurement.points[i].z << std::endl;
@@ -286,10 +340,174 @@ public:
             }
         }
 
-        if(this->lat_sub->has_msg()){
-            std::cout << "got a lat measurement" << std::endl;
+        if(this->lat_sub->has_msg() && this->long_sub->has_msg() && this->heading_sub->has_msg()){
+            std::cout << "got a gps measurement" << std::endl;
             this->Lat_measurement = *(this->lat_sub->take());
-            std::cout << std::setprecision(15) << this->Lat_measurement.data << std::endl;
+			this->Long_measurement = *(this->long_sub->take());
+			this->Heading_measurement = *(this->heading_sub->take());
+			double lat = this->Lat_measurement.data;
+			double lon = this->Long_measurement.data;
+			double hdg = this->Heading_measurement.data;
+            // std::cout << std::setprecision(15) << this->Lat_measurement.data << std::endl;
+
+			uint8_t* Trajectory_Map_pixel_ptr = (uint8_t*)Trajectory_Map.data;
+			int cn = Trajectory_Map.channels();
+
+			if(!this->origin_is_set){ // starting at the origin
+				this->origin_is_set = true;
+				this->origin.latitude = lat;
+				this->origin.longitude = lon;
+				this->origin.altitude = 0;
+
+				Eigen::MatrixXd x_coord = Eigen::MatrixXd::Zero(2,1);
+				x_coord(0,0) = 0.0;
+				x_coord(1,0) = 0.0;
+				Eigen::MatrixXd x_map_frame = frame_transformation(this->mapTworld,x_coord);
+				int x_index = int(round(x_map_frame(0,0)));
+				int y_index = int(round(x_map_frame(1,0)));
+
+				if(x_index < MAP_SIZE+1 && y_index < MAP_SIZE+1){
+					std::cout << "plotting trajectory center" << std::endl;
+					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + x_index*cn + 0] = 0; // B
+					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + x_index*cn + 1] = 255; // G
+					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + x_index*cn + 2] = 255; // R
+				}
+
+				if(x_index+1 < MAP_SIZE+1 && y_index < MAP_SIZE+1){
+					std::cout << "plotting trajectory center" << std::endl;
+					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + (x_index+1)*cn + 0] = 0; // B
+					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + (x_index+1)*cn + 1] = 255; // G
+					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + (x_index+1)*cn + 2] = 255; // R
+				}
+
+				if(x_index-1 < MAP_SIZE+1 && y_index < MAP_SIZE+1){
+					std::cout << "plotting trajectory center" << std::endl;
+					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + (x_index-1)*cn + 0] = 0; // B
+					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + (x_index-1)*cn + 1] = 255; // G
+					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + (x_index-1)*cn + 2] = 255; // R
+				}
+
+				if(x_index < MAP_SIZE+1 && y_index+1 < MAP_SIZE+1){
+					std::cout << "plotting trajectory center" << std::endl;
+					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + x_index*cn + 0] = 0; // B
+					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + x_index*cn + 1] = 255; // G
+					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + x_index*cn + 2] = 255; // R
+				}
+
+				if(x_index < MAP_SIZE+1 && y_index-1 < MAP_SIZE+1){
+					std::cout << "plotting trajectory center" << std::endl;
+					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + x_index*cn + 0] = 0; // B
+					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + x_index*cn + 1] = 255; // G
+					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + x_index*cn + 2] = 255; // R
+				}
+
+				if(x_index+1 < MAP_SIZE+1 && y_index+1 < MAP_SIZE+1){
+					std::cout << "plotting trajectory center" << std::endl;
+					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + (x_index+1)*cn + 0] = 0; // B
+					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + (x_index+1)*cn + 1] = 255; // G
+					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + (x_index+1)*cn + 2] = 255; // R
+				}
+
+				if(x_index-1 < MAP_SIZE+1 && y_index-1 < MAP_SIZE+1){
+					std::cout << "plotting trajectory center" << std::endl;
+					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + (x_index-1)*cn + 0] = 0; // B
+					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + (x_index-1)*cn + 1] = 255; // G
+					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + (x_index-1)*cn + 2] = 255; // R
+				}
+
+				if(x_index+1 < MAP_SIZE+1 && y_index-1 < MAP_SIZE+1){
+					std::cout << "plotting trajectory center" << std::endl;
+					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + (x_index+1)*cn + 0] = 0; // B
+					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + (x_index+1)*cn + 1] = 255; // G
+					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + (x_index+1)*cn + 2] = 255; // R
+				}
+
+				if(x_index-1 < MAP_SIZE+1 && y_index+1 < MAP_SIZE+1){
+					std::cout << "plotting trajectory center" << std::endl;
+					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + (x_index-1)*cn + 0] = 0; // B
+					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + (x_index-1)*cn + 1] = 255; // G
+					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + (x_index-1)*cn + 2] = 255; // R
+				}
+			}
+			else{
+				GpsPosition target;
+				target.latitude = lat;
+				target.longitude = lon;
+				target.altitude = 0;
+
+				Position3d pos = to_enu(target, this->origin);
+				//std::cout << "x: " << pos.x << " y: " << pos.y << std::endl;
+
+				Eigen::MatrixXd x_coord = Eigen::MatrixXd::Zero(2,1);
+				x_coord(0,0) = pos.x;
+				x_coord(1,0) = pos.y;
+				Eigen::MatrixXd x_map_frame = frame_transformation(this->mapTworld,x_coord);
+				int x_index = int(round(x_map_frame(0,0)));
+				int y_index = int(round(x_map_frame(1,0)));
+
+				if(x_index < MAP_SIZE+1 && y_index < MAP_SIZE+1){
+					std::cout << "plotting trajectory" << std::endl;
+					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + x_index*cn + 0] = 0; // B
+					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + x_index*cn + 1] = 255; // G
+					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + x_index*cn + 2] = 255; // R
+				}
+
+				if(x_index+1 < MAP_SIZE+1 && y_index < MAP_SIZE+1){
+					std::cout << "plotting trajectory" << std::endl;
+					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + (x_index+1)*cn + 0] = 0; // B
+					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + (x_index+1)*cn + 1] = 255; // G
+					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + (x_index+1)*cn + 2] = 255; // R
+				}
+
+				if(x_index-1 < MAP_SIZE+1 && y_index < MAP_SIZE+1){
+					std::cout << "plotting trajectory" << std::endl;
+					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + (x_index-1)*cn + 0] = 0; // B
+					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + (x_index-1)*cn + 1] = 255; // G
+					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + (x_index-1)*cn + 2] = 255; // R
+				}
+
+				if(x_index < MAP_SIZE+1 && y_index+1 < MAP_SIZE+1){
+					std::cout << "plotting trajectory" << std::endl;
+					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + x_index*cn + 0] = 0; // B
+					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + x_index*cn + 1] = 255; // G
+					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + x_index*cn + 2] = 255; // R
+				}
+
+				if(x_index < MAP_SIZE+1 && y_index-1 < MAP_SIZE+1){
+					std::cout << "plotting trajectory" << std::endl;
+					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + x_index*cn + 0] = 0; // B
+					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + x_index*cn + 1] = 255; // G
+					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + x_index*cn + 2] = 255; // R
+				}
+
+				if(x_index+1 < MAP_SIZE+1 && y_index+1 < MAP_SIZE+1){
+					std::cout << "plotting trajectory" << std::endl;
+					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + (x_index+1)*cn + 0] = 0; // B
+					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + (x_index+1)*cn + 1] = 255; // G
+					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + (x_index+1)*cn + 2] = 255; // R
+				}
+
+				if(x_index-1 < MAP_SIZE+1 && y_index-1 < MAP_SIZE+1){
+					std::cout << "plotting trajectory" << std::endl;
+					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + (x_index-1)*cn + 0] = 0; // B
+					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + (x_index-1)*cn + 1] = 255; // G
+					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + (x_index-1)*cn + 2] = 255; // R
+				}
+
+				if(x_index+1 < MAP_SIZE+1 && y_index-1 < MAP_SIZE+1){
+					std::cout << "plotting trajectory" << std::endl;
+					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + (x_index+1)*cn + 0] = 0; // B
+					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + (x_index+1)*cn + 1] = 255; // G
+					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + (x_index+1)*cn + 2] = 255; // R
+				}
+
+				if(x_index-1 < MAP_SIZE+1 && y_index+1 < MAP_SIZE+1){
+					std::cout << "plotting trajectory" << std::endl;
+					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + (x_index-1)*cn + 0] = 0; // B
+					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + (x_index-1)*cn + 1] = 255; // G
+					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + (x_index-1)*cn + 2] = 255; // R
+				}
+			}
         }
 
 		mtx.unlock();
@@ -328,6 +546,42 @@ int main(int argc, char** argv){
 	std::cout << "x: \n" << x << std::endl;
 
 	std::cout << "result: \n" << frame_transformation(T,x) << std::endl;
+
+	std::cout << "ucsd lat: 32.88270231943836 long: -117.23337278535736" << std::endl;
+	double ucsd_lat = 32.88270231943836;
+	double ucsd_long = -117.23337278535736;
+
+	std::cout << "SF lat: 37.76907861038003 long: -122.42627274779468" << std::endl;
+	double SF_lat = 37.76907861038003;
+	double SF_long = -122.42627274779468;
+
+	std::cout << "select ucsd as the origin, east is x+, north is y+" << std::endl;
+
+	GpsPosition origin;
+	origin.latitude = ucsd_lat;
+	origin.longitude = ucsd_long;
+	origin.altitude = 0;
+
+	GpsPosition target;
+	target.latitude = SF_lat;
+	target.longitude = SF_long;
+	target.altitude = 0;
+
+	Position3d pos = to_enu(target, origin);
+
+	std::cout << "x: " << pos.x << " y: " << pos.y << std::endl;
+
+	std::cout << "LV lat: 36.19724756539705 long: -115.11750858691522" << std::endl;
+	double LV_lat = 36.19724756539705;
+	double LV_long = -115.11750858691522;
+
+	target.latitude = LV_lat;
+	target.longitude = LV_long;
+	target.altitude = 0;
+
+	pos = to_enu(target, origin);
+
+	std::cout << "x: " << pos.x << " y: " << pos.y << std::endl;
 
     rclcpp::init(argc, argv);
 	rclcpp::NodeOptions options{};

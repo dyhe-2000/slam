@@ -18,7 +18,12 @@ find_package(eigen3_cmake_module REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(livox_interfaces REQUIRED)
 find_package(geometry_msgs REQUIRED)
-ament_auto_find_build_dependencies()
+set(CMAKE_MODULE_PATH "${CMAKE_MODULE_PATH};/usr/share/cmake/geographiclib")
+find_package(GeographicLib REQUIRED)
+ament_auto_find_build_dependencies(REQUIRED
+  ${${PROJECT_NAME}_BUILD_DEPENDS}
+  ${${PROJECT_NAME}_BUILDTOOL_DEPENDS}
+)
 
 ament_auto_add_executable(slam_script src/slam_script.cpp)
 ament_target_dependencies(slam_script rclcpp std_msgs sensor_msgs OpenCV cv_bridge Eigen3 livox_interfaces geometry_msgs)
@@ -26,6 +31,8 @@ ament_target_dependencies(slam_script rclcpp std_msgs sensor_msgs OpenCV cv_brid
 install(TARGETS
 	slam_script
 	DESTINATION lib/${PROJECT_NAME})
+
+target_link_libraries(slam_script ${GeographicLib_LIBRARIES})
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
