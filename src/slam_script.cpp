@@ -36,7 +36,8 @@
 using std::placeholders::_1;
 std::mutex mtx;
 
-#define MAP_SIZE 800 // will +1 for making origin
+#define MAP_SIZE 1400 // will +1 for making origin
+#define LIDAR_FRAME_SIZE 800 // will +1 for making origin
 #define MAP_RESOLUTION 0.05
 #define NUM_PARTICLES 1 //175
 #define X_VARIANCE 0.0 //0.01
@@ -125,11 +126,27 @@ Eigen::MatrixXd frame_transformation(Eigen::MatrixXd& T, Eigen::MatrixXd& x){
 	//return homo_outs.block(0, 0, 2, n);
 }
 
+Eigen::MatrixXd calc_worldTbody(Eigen::MatrixXd& x){
+	// x is 3 by 1
+	Eigen::MatrixXd worldTbody(4, 4); //4 by n matrix
+	worldTbody = Eigen::MatrixXd::Zero(4,4);
+	worldTbody(0,0) = 1;
+	worldTbody(1,1) = worldTbody(2,2) = worldTbody(3,3) = worldTbody(0,0);
+	worldTbody(0,0) = cos(x(2,0));
+	worldTbody(0,1) = -sin(x(2,0));
+	worldTbody(1,0) = sin(x(2,0));
+	worldTbody(1,1) = cos(x(2,0));
+	worldTbody(0,3) = x(0,0);
+	worldTbody(1,3) = x(1,0);
+	return worldTbody;
+}
+
 class slam_node : public rclcpp::Node{
 protected:
 	// publisher
-    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr img_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr lidar_frame_map_pub_;
 	rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr trajectory_map_pub_;
+	rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr occupancy_grid_map_pub_;
 	rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr coord_pub_; // x and y are in integer coord
         
 	// timer
@@ -143,14 +160,17 @@ protected:
 	rclcpp::Time last_step_time_;
 	bool Lidar_Valid;
 	bool firstScan;
-	cv::Mat Map = cv::Mat(MAP_SIZE+1, MAP_SIZE+1, CV_32FC1, cv::Scalar(0)); // each grid length MAP_RESOLUTION m
+	cv::Mat Lidar_Frame_Map = cv::Mat(LIDAR_FRAME_SIZE+1, LIDAR_FRAME_SIZE+1, CV_32FC1, cv::Scalar(0)); // each grid length MAP_RESOLUTION m
 	cv::Mat Trajectory_Map = cv::Mat(MAP_SIZE+1, MAP_SIZE+1, CV_8UC3, cv::Scalar(0, 0, 0)); // each grid length MAP_RESOLUTION m
+	cv::Mat Occupancy_Grid_Map = cv::Mat(MAP_SIZE+1, MAP_SIZE+1, CV_8UC3, cv::Scalar(0, 0, 0)); // each grid length MAP_RESOLUTION m
 	double log_odds_map[MAP_SIZE + 1][MAP_SIZE + 1] = {};
 	double Map_resolution = MAP_RESOLUTION;
-	Eigen::MatrixXd x = Eigen::MatrixXd::Zero(3,NUM_PARTICLES); // x,y,theta in world frame, initially 0
+	Eigen::MatrixXd x_tpre = Eigen::MatrixXd::Zero(3,NUM_PARTICLES); // x,y,theta in world frame, initially 0
+	Eigen::MatrixXd x_tnow = Eigen::MatrixXd::Zero(3,NUM_PARTICLES); // x,y,theta in world frame, initially 0
 	Eigen::MatrixXd mapTworld = Eigen::MatrixXd::Zero(4,4);
 	Eigen::MatrixXd bodyTlidar = Eigen::MatrixXd::Zero(4,4);
 	Eigen::MatrixXd worldTbody = Eigen::MatrixXd::Zero(4,4);
+	Eigen::MatrixXd body_cross_body_frame = Eigen::MatrixXd::Zero(2,200); // x,y
 	rclcpp::Time previous_read_imu_message_time_stamp;
 	long long int step_counter;
 	geometry_msgs::msg::Vector3 coord_message; 
@@ -171,6 +191,7 @@ protected:
 public:
 	explicit slam_node(const rclcpp::NodeOptions & options): Node("slam_node", options) {
 		std::cout << "this is boat project slam node" << std::endl;
+		std::cout << "float size: " << sizeof(float) * CHAR_BIT << std::endl;
 
 		// initialize mapTworld
 		mapTworld(0,0) = 1/Map_resolution;
@@ -195,16 +216,29 @@ public:
 		worldTbody(1,1) = worldTbody(2,2) = worldTbody(3,3) = worldTbody(0,0);
 		std::cout << "worldTbody: \n" << worldTbody << std::endl;
 
+		// initialize body_cross_body_frame, this forms 1 meter x, y cross in body frame
+		for(int i = 0; i < 100; ++i){
+			body_cross_body_frame(0,i) = i*0.01;
+			body_cross_body_frame(1,i) = 0.0;
+		}
+		for(int i = 100; i < 200; ++i){
+			body_cross_body_frame(0,i) = 0.0;
+			body_cross_body_frame(1,i) = (i-100)*0.01;
+		}
+
 		// initialize coord_message
 		coord_message.x = 0;
 		coord_message.y = 0;
 		coord_message.z = 0;
 
 		// initialize x
-        this->x(0,0) = 0;
-        this->x(1,0) = 0;
-        this->x(2,0) = 0;
-		std::cout << "x: \n" << this->x << std::endl;
+        this->x_tpre(0,0) = 0;
+        this->x_tpre(1,0) = 0;
+        this->x_tpre(2,0) = 0;
+		this->x_tnow(0,0) = 0;
+        this->x_tnow(1,0) = 0;
+        this->x_tnow(2,0) = 0;
+		std::cout << "x: \n" << this->x_tpre << std::endl;
 
 		declare_parameter("map_publisher_freq", 10);
         get_parameter("map_publisher_freq", this->map_publisher_freq);
@@ -215,9 +249,20 @@ public:
 		origin_is_set = false;
 
 		mtx.lock();
+		// clear occupancy grid map
+		uint8_t* Occupancy_Grid_Map_pixel_ptr = (uint8_t*)Occupancy_Grid_Map.data;
+		int cn = Occupancy_Grid_Map.channels();
+		for(int i = 0; i < MAP_SIZE+1; ++i){
+			for(int j = 0; j < MAP_SIZE+1; ++j){
+				Occupancy_Grid_Map_pixel_ptr[i*Occupancy_Grid_Map.cols*cn + j*cn + 0] = 0; // B
+				Occupancy_Grid_Map_pixel_ptr[i*Occupancy_Grid_Map.cols*cn + j*cn + 1] = 0; // G
+				Occupancy_Grid_Map_pixel_ptr[i*Occupancy_Grid_Map.cols*cn + j*cn + 2] = 0; // R
+			}
+		}
+
 		// clear trajectory map
 		uint8_t* Trajectory_Map_pixel_ptr = (uint8_t*)Trajectory_Map.data;
-		int cn = Trajectory_Map.channels();
+		cn = Trajectory_Map.channels();
 		for(int i = 0; i < MAP_SIZE+1; ++i){
 			for(int j = 0; j < MAP_SIZE+1; ++j){
 				Trajectory_Map_pixel_ptr[i*Trajectory_Map.cols*cn + j*cn + 0] = 0; // B
@@ -226,18 +271,19 @@ public:
 			}
 		}
 
-		// clear map
-		float* Map_pixel_ptr = (float*)Map.data;
-		for(int j = 0; j < MAP_SIZE+1; ++j){
-			for(int k = 0; k < MAP_SIZE+1; ++k){
-				Map_pixel_ptr[j*Map.cols + k] = 0.0;
+		// clear Lidar_Frame_Map
+		float* Map_pixel_ptr = (float*)Lidar_Frame_Map.data;
+		for(int j = 0; j < LIDAR_FRAME_SIZE+1; ++j){
+			for(int k = 0; k < LIDAR_FRAME_SIZE+1; ++k){
+				Map_pixel_ptr[j*Lidar_Frame_Map.cols + k] = 0.0;
 			}
 		}
 		mtx.unlock();
 
 		// initialize the member publisher
-		this->img_pub_ = this->create_publisher<sensor_msgs::msg::Image>("slam_map", 10);
+		this->lidar_frame_map_pub_ = this->create_publisher<sensor_msgs::msg::Image>("lidar_frame_map", 10);
 		this->trajectory_map_pub_ = this->create_publisher<sensor_msgs::msg::Image>("slam_trajectory_map", 10);
+		this->occupancy_grid_map_pub_ = this->create_publisher<sensor_msgs::msg::Image>("slam_occupancy_grid_map", 10);
 		this->coord_pub_ = this->create_publisher<geometry_msgs::msg::Vector3>("slam_coord", 10);
 		
 		// initialize the buffer subscribers
@@ -266,7 +312,7 @@ public:
 		// single_channel_pixel_ptr[2*single_channel_image.cols + 2] = 0.8;
 		// single_channel_pixel_ptr[0*single_channel_image.cols + 0] = 0.6;
 		// cv::threshold(single_channel_image, single_channel_image, 0.5, 255.0, 0);
-		cv::Mat single_channel_image = this->Map;
+		cv::Mat single_channel_image = this->Lidar_Frame_Map;
 		single_channel_image.convertTo(single_channel_image, CV_8UC1);
 
 		// example of publishing image out
@@ -282,7 +328,7 @@ public:
 		image_msg->is_bigendian = false;
 		image_msg->step = static_cast<sensor_msgs::msg::Image::_step_type>(single_channel_image.step);
 		image_msg->data.assign(single_channel_image.datastart,single_channel_image.dataend);
-		img_pub_->publish(std::move(image_msg));
+		lidar_frame_map_pub_->publish(std::move(image_msg));
 
 		//this->Trajectory_Map; // 8UC3
 		sensor_msgs::msg::Image::UniquePtr trajectory_map_msg(new sensor_msgs::msg::Image());
@@ -296,50 +342,99 @@ public:
 		trajectory_map_msg->data.assign(this->Trajectory_Map.datastart,this->Trajectory_Map.dataend);
 		trajectory_map_pub_->publish(std::move(trajectory_map_msg));
 
+		//this->Trajectory_Map; // 8UC3
+		sensor_msgs::msg::Image::UniquePtr occupancy_grid_map_msg(new sensor_msgs::msg::Image());
+		stamp = now();
+		occupancy_grid_map_msg->header.stamp = stamp;
+		occupancy_grid_map_msg->height = this->Occupancy_Grid_Map.rows;
+		occupancy_grid_map_msg->width = this->Occupancy_Grid_Map.cols;
+		occupancy_grid_map_msg->encoding = "8UC3";
+		occupancy_grid_map_msg->is_bigendian = false;
+		occupancy_grid_map_msg->step = static_cast<sensor_msgs::msg::Image::_step_type>(this->Occupancy_Grid_Map.step);
+		occupancy_grid_map_msg->data.assign(this->Occupancy_Grid_Map.datastart,this->Occupancy_Grid_Map.dataend);
+		occupancy_grid_map_pub_->publish(std::move(occupancy_grid_map_msg));
+
 
 		// publish x and y coord in map
 		coord_pub_->publish(this->coord_message);
 		mtx.unlock();
     }
 
+	void plotting_point_on_map(cv::Mat& map, int x_index, int y_index, int R, int G, int B){
+		uint8_t* map_ptr = (uint8_t*)map.data;
+		int cn = map.channels();
+		if(x_index < MAP_SIZE+1 && x_index >=0 && y_index < MAP_SIZE+1 && y_index >= 0){
+			map_ptr[y_index*map.cols*cn + x_index*cn + 0] = R;
+			map_ptr[y_index*map.cols*cn + x_index*cn + 1] = G;
+			map_ptr[y_index*map.cols*cn + x_index*cn + 2] = B;
+		}
+	}
+
+	void plotting_fat_point_on_map(cv::Mat& map, int x_index, int y_index, int R, int G, int B){
+		uint8_t* map_ptr = (uint8_t*)map.data;
+		int cn = map.channels();
+		if(x_index < MAP_SIZE+1 && x_index >=0 && y_index < MAP_SIZE+1 && y_index >= 0){
+			map_ptr[y_index*map.cols*cn + x_index*cn + 0] = R;
+			map_ptr[y_index*map.cols*cn + x_index*cn + 1] = G;
+			map_ptr[y_index*map.cols*cn + x_index*cn + 2] = B;
+		}
+		
+		for(int i = 1; i < 2; ++i){
+			if(x_index+i < MAP_SIZE+1 && x_index+i >= 0 && y_index < MAP_SIZE+1 && y_index >= 0){
+				map_ptr[y_index*map.cols*cn + (x_index+i)*cn + 0] = R;
+				map_ptr[y_index*map.cols*cn + (x_index+i)*cn + 1] = G;
+				map_ptr[y_index*map.cols*cn + (x_index+i)*cn + 2] = B;
+			}
+			
+			if(x_index-i < MAP_SIZE+1 && x_index-i >= 0 && y_index < MAP_SIZE+1 && y_index >= 0){
+				map_ptr[y_index*map.cols*cn + (x_index-i)*cn + 0] = R;
+				map_ptr[y_index*map.cols*cn + (x_index-i)*cn + 1] = G;
+				map_ptr[y_index*map.cols*cn + (x_index-i)*cn + 2] = B;
+			}
+			
+			if(x_index < MAP_SIZE+1 && x_index >= 0 && y_index+i < MAP_SIZE+1 && y_index+i >= 0){
+				map_ptr[(y_index+i)*map.cols*cn + x_index*cn + 0] = R;
+				map_ptr[(y_index+i)*map.cols*cn + x_index*cn + 1] = G;
+				map_ptr[(y_index+i)*map.cols*cn + x_index*cn + 2] = B;
+			}
+
+			if(x_index < MAP_SIZE+1 && x_index >= 0 && y_index-i < MAP_SIZE+1 && y_index-i >= 0){
+				map_ptr[(y_index-i)*map.cols*cn + x_index*cn + 0] = R;
+				map_ptr[(y_index-i)*map.cols*cn + x_index*cn + 1] = G;
+				map_ptr[(y_index-i)*map.cols*cn + x_index*cn + 2] = B;
+			}
+			
+			if(x_index+i < MAP_SIZE+1 && x_index+i >= 0 && y_index+i < MAP_SIZE+1 && y_index+i >= 0){
+				map_ptr[(y_index+i)*map.cols*cn + (x_index+i)*cn + 0] = R;
+				map_ptr[(y_index+i)*map.cols*cn + (x_index+i)*cn + 1] = G;
+				map_ptr[(y_index+i)*map.cols*cn + (x_index+i)*cn + 2] = B;
+			}
+
+			if(x_index-i < MAP_SIZE+1 && x_index-i >= 0 && y_index-i < MAP_SIZE+1 && y_index-i >= 0){
+				map_ptr[(y_index-i)*map.cols*cn + (x_index-i)*cn + 0] = R;
+				map_ptr[(y_index-i)*map.cols*cn + (x_index-i)*cn + 1] = G;
+				map_ptr[(y_index-i)*map.cols*cn + (x_index-i)*cn + 2] = B;
+			}
+
+			if(x_index+i < MAP_SIZE+1 && x_index+i >= 0 && y_index-i < MAP_SIZE+1 && y_index-i >= 0){
+				map_ptr[(y_index-i)*map.cols*cn + (x_index+i)*cn + 0] = R;
+				map_ptr[(y_index-i)*map.cols*cn + (x_index+i)*cn + 1] = G;
+				map_ptr[(y_index-i)*map.cols*cn + (x_index+i)*cn + 2] = B;
+			}
+
+			if(x_index-i < MAP_SIZE+1 && x_index-i >= 0 && y_index+i < MAP_SIZE+1 && y_index+i >= 0){
+				map_ptr[(y_index+i)*map.cols*cn + (x_index-i)*cn + 0] = R;
+				map_ptr[(y_index+i)*map.cols*cn + (x_index-i)*cn + 1] = G;
+				map_ptr[(y_index+i)*map.cols*cn + (x_index-i)*cn + 2] = B;
+			}
+		}
+	}
+
     void step(){
 		this->check_duration_timer.reset();
 		mtx.lock();
-		
-        if(this->lidar_sub->has_msg()){
-            std::cout << "got a lidar measurement" << std::endl;
-            this->Lidar_measurement = *(this->lidar_sub->take());
-            std::cout << "point_num: " << Lidar_measurement.point_num << std::endl;
 
-            float* Map_pixel_ptr = (float*)Map.data;
-            for(int j = 0; j < MAP_SIZE+1; ++j){
-                for(int k = 0; k < MAP_SIZE+1; ++k){
-                    Map_pixel_ptr[j*Map.cols + k] = 0.0;
-                }
-            }
-
-            for(int i = 0; i < Lidar_measurement.point_num; ++i){
-                if(Lidar_measurement.points[i].x != 0 || Lidar_measurement.points[i].y != 0 || Lidar_measurement.points[i].z != 0){
-                    if(Lidar_measurement.points[i].z <= 1 && Lidar_measurement.points[i].z >= -1){
-                        if(Lidar_measurement.points[i].x <= 20 && Lidar_measurement.points[i].x >= -20 && Lidar_measurement.points[i].y <= 20 && Lidar_measurement.points[i].y >= -20){
-                            //std::cout << "x: " << Lidar_measurement.points[i].x << std::endl;
-                            //std::cout << "y: " << Lidar_measurement.points[i].y << std::endl;
-                            //std::cout << "z: " << Lidar_measurement.points[i].z << std::endl;
-
-                            Eigen::MatrixXd x_coord = Eigen::MatrixXd::Zero(2,1);
-                            x_coord(0,0) = Lidar_measurement.points[i].x;
-		                    x_coord(1,0) = Lidar_measurement.points[i].y;
-		                    Eigen::MatrixXd x_map_frame = frame_transformation(this->mapTworld,x_coord);
-                            int x_index = int(round(x_map_frame(0,0)));
-		                    int y_index = int(round(x_map_frame(1,0)));
-
-                            Map_pixel_ptr[y_index*Map.cols + x_index] = 255.0;
-                        }
-                    }
-                }
-            }
-        }
-
+		// received gps message
         if(this->lat_sub->has_msg() && this->long_sub->has_msg() && this->heading_sub->has_msg()){
             std::cout << "got a gps measurement" << std::endl;
             this->Lat_measurement = *(this->lat_sub->take());
@@ -359,6 +454,13 @@ public:
 				this->origin.longitude = lon;
 				this->origin.altitude = 0;
 
+				this->x_tpre(0,0) = 0;
+				this->x_tpre(1,0) = 0;
+				this->x_tpre(2,0) = 0;
+				this->x_tnow(0,0) = 0;
+				this->x_tnow(1,0) = 0;
+				this->x_tnow(2,0) = 0;
+
 				Eigen::MatrixXd x_coord = Eigen::MatrixXd::Zero(2,1);
 				x_coord(0,0) = 0.0;
 				x_coord(1,0) = 0.0;
@@ -366,68 +468,7 @@ public:
 				int x_index = int(round(x_map_frame(0,0)));
 				int y_index = int(round(x_map_frame(1,0)));
 
-				if(x_index < MAP_SIZE+1 && y_index < MAP_SIZE+1){
-					std::cout << "plotting trajectory center" << std::endl;
-					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + x_index*cn + 0] = 0; // B
-					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + x_index*cn + 1] = 255; // G
-					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + x_index*cn + 2] = 255; // R
-				}
-
-				if(x_index+1 < MAP_SIZE+1 && y_index < MAP_SIZE+1){
-					std::cout << "plotting trajectory center" << std::endl;
-					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + (x_index+1)*cn + 0] = 0; // B
-					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + (x_index+1)*cn + 1] = 255; // G
-					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + (x_index+1)*cn + 2] = 255; // R
-				}
-
-				if(x_index-1 < MAP_SIZE+1 && y_index < MAP_SIZE+1){
-					std::cout << "plotting trajectory center" << std::endl;
-					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + (x_index-1)*cn + 0] = 0; // B
-					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + (x_index-1)*cn + 1] = 255; // G
-					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + (x_index-1)*cn + 2] = 255; // R
-				}
-
-				if(x_index < MAP_SIZE+1 && y_index+1 < MAP_SIZE+1){
-					std::cout << "plotting trajectory center" << std::endl;
-					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + x_index*cn + 0] = 0; // B
-					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + x_index*cn + 1] = 255; // G
-					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + x_index*cn + 2] = 255; // R
-				}
-
-				if(x_index < MAP_SIZE+1 && y_index-1 < MAP_SIZE+1){
-					std::cout << "plotting trajectory center" << std::endl;
-					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + x_index*cn + 0] = 0; // B
-					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + x_index*cn + 1] = 255; // G
-					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + x_index*cn + 2] = 255; // R
-				}
-
-				if(x_index+1 < MAP_SIZE+1 && y_index+1 < MAP_SIZE+1){
-					std::cout << "plotting trajectory center" << std::endl;
-					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + (x_index+1)*cn + 0] = 0; // B
-					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + (x_index+1)*cn + 1] = 255; // G
-					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + (x_index+1)*cn + 2] = 255; // R
-				}
-
-				if(x_index-1 < MAP_SIZE+1 && y_index-1 < MAP_SIZE+1){
-					std::cout << "plotting trajectory center" << std::endl;
-					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + (x_index-1)*cn + 0] = 0; // B
-					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + (x_index-1)*cn + 1] = 255; // G
-					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + (x_index-1)*cn + 2] = 255; // R
-				}
-
-				if(x_index+1 < MAP_SIZE+1 && y_index-1 < MAP_SIZE+1){
-					std::cout << "plotting trajectory center" << std::endl;
-					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + (x_index+1)*cn + 0] = 0; // B
-					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + (x_index+1)*cn + 1] = 255; // G
-					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + (x_index+1)*cn + 2] = 255; // R
-				}
-
-				if(x_index-1 < MAP_SIZE+1 && y_index+1 < MAP_SIZE+1){
-					std::cout << "plotting trajectory center" << std::endl;
-					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + (x_index-1)*cn + 0] = 0; // B
-					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + (x_index-1)*cn + 1] = 255; // G
-					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + (x_index-1)*cn + 2] = 255; // R
-				}
+				plotting_point_on_map(this->Trajectory_Map, x_index, y_index, 255, 255, 255);
 			}
 			else{
 				GpsPosition target;
@@ -438,77 +479,133 @@ public:
 				Position3d pos = to_enu(target, this->origin);
 				//std::cout << "x: " << pos.x << " y: " << pos.y << std::endl;
 
-				Eigen::MatrixXd x_coord = Eigen::MatrixXd::Zero(2,1);
-				x_coord(0,0) = pos.x;
-				x_coord(1,0) = pos.y;
-				Eigen::MatrixXd x_map_frame = frame_transformation(this->mapTworld,x_coord);
-				int x_index = int(round(x_map_frame(0,0)));
-				int y_index = int(round(x_map_frame(1,0)));
+				this->x_tpre(0,0) = this->x_tnow(0,0);
+				this->x_tpre(1,0) = this->x_tnow(1,0);
+				this->x_tpre(2,0) = this->x_tnow(2,0);
+				this->x_tnow(0,0) = pos.x;
+				this->x_tnow(1,0) = pos.y;
+				this->x_tnow(2,0) = ((90.0-hdg)/180.0)*M_PI;
 
-				if(x_index < MAP_SIZE+1 && y_index < MAP_SIZE+1){
-					std::cout << "plotting trajectory" << std::endl;
-					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + x_index*cn + 0] = 0; // B
-					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + x_index*cn + 1] = 255; // G
-					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + x_index*cn + 2] = 255; // R
+				this->worldTbody = calc_worldTbody(this->x_tnow);
+				Eigen::MatrixXd worldTbody_pre = calc_worldTbody(this->x_tpre);
+
+				Eigen::MatrixXd cross_map_coor_now = frame_transformation(this->worldTbody, this->body_cross_body_frame);
+				Eigen::MatrixXd cross_map_coor_pre = frame_transformation(worldTbody_pre, this->body_cross_body_frame);
+				Eigen::MatrixXd cross_map_coor_now_map = this->mapTworld*cross_map_coor_now;
+				Eigen::MatrixXd cross_map_coor_pre_map = this->mapTworld*cross_map_coor_pre;
+				
+				// erasing pre cross
+				for(int i = 100; i < cross_map_coor_pre_map.cols(); ++i){
+					int x_index = int(round(cross_map_coor_pre_map(0,i)));
+					int y_index = int(round(cross_map_coor_pre_map(1,i)));
+
+					plotting_fat_point_on_map(this->Trajectory_Map, x_index, y_index, 0, 0, 0);
+					plotting_fat_point_on_map(this->Occupancy_Grid_Map, x_index, y_index, 0, 0, 0);
+				}
+				for(int i = 0; i < cross_map_coor_pre_map.cols()/2; ++i){
+					int x_index = int(round(cross_map_coor_pre_map(0,i)));
+					int y_index = int(round(cross_map_coor_pre_map(1,i)));
+
+					plotting_fat_point_on_map(this->Trajectory_Map, x_index, y_index, 0, 0, 0);
+					plotting_fat_point_on_map(this->Occupancy_Grid_Map, x_index, y_index, 0, 0, 0);
 				}
 
-				if(x_index+1 < MAP_SIZE+1 && y_index < MAP_SIZE+1){
-					std::cout << "plotting trajectory" << std::endl;
-					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + (x_index+1)*cn + 0] = 0; // B
-					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + (x_index+1)*cn + 1] = 255; // G
-					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + (x_index+1)*cn + 2] = 255; // R
+				// plotting cur cross
+				for(int i = 100; i < cross_map_coor_now_map.cols(); ++i){
+					int x_index = int(round(cross_map_coor_now_map(0,i)));
+					int y_index = int(round(cross_map_coor_now_map(1,i)));
+
+					plotting_fat_point_on_map(this->Trajectory_Map, x_index, y_index, 0, 255, 0);
+					plotting_fat_point_on_map(this->Occupancy_Grid_Map, x_index, y_index, 0, 255, 0);
+				}
+				for(int i = 0; i < cross_map_coor_now_map.cols()/2; ++i){
+					int x_index = int(round(cross_map_coor_now_map(0,i)));
+					int y_index = int(round(cross_map_coor_now_map(1,i)));
+
+					plotting_fat_point_on_map(this->Trajectory_Map, x_index, y_index, 255, 0, 0);
+					plotting_fat_point_on_map(this->Occupancy_Grid_Map, x_index, y_index, 255, 0, 0);
 				}
 
-				if(x_index-1 < MAP_SIZE+1 && y_index < MAP_SIZE+1){
-					std::cout << "plotting trajectory" << std::endl;
-					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + (x_index-1)*cn + 0] = 0; // B
-					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + (x_index-1)*cn + 1] = 255; // G
-					Trajectory_Map_pixel_ptr[y_index*Trajectory_Map.cols*cn + (x_index-1)*cn + 2] = 255; // R
-				}
+				// plotting pre center
+				Eigen::MatrixXd x_coord_pre = Eigen::MatrixXd::Zero(2,1);
+				x_coord_pre(0,0) = this->x_tpre(0,0);
+				x_coord_pre(1,0) = this->x_tpre(1,0);
+				Eigen::MatrixXd x_map_frame_pre = frame_transformation(this->mapTworld,x_coord_pre);
+				int x_index = int(round(x_map_frame_pre(0,0)));
+				int y_index = int(round(x_map_frame_pre(1,0)));
 
-				if(x_index < MAP_SIZE+1 && y_index+1 < MAP_SIZE+1){
-					std::cout << "plotting trajectory" << std::endl;
-					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + x_index*cn + 0] = 0; // B
-					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + x_index*cn + 1] = 255; // G
-					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + x_index*cn + 2] = 255; // R
-				}
+				plotting_fat_point_on_map(this->Trajectory_Map, x_index, y_index, 255, 255, 255);
 
-				if(x_index < MAP_SIZE+1 && y_index-1 < MAP_SIZE+1){
-					std::cout << "plotting trajectory" << std::endl;
-					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + x_index*cn + 0] = 0; // B
-					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + x_index*cn + 1] = 255; // G
-					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + x_index*cn + 2] = 255; // R
-				}
+				// plotting cur center
+				Eigen::MatrixXd x_coord_now = Eigen::MatrixXd::Zero(2,1);
+				x_coord_now(0,0) = this->x_tnow(0,0);
+				x_coord_now(1,0) = this->x_tnow(1,0);
+				Eigen::MatrixXd x_map_frame_now = frame_transformation(this->mapTworld,x_coord_now);
+				x_index = int(round(x_map_frame_now(0,0)));
+				y_index = int(round(x_map_frame_now(1,0)));
 
-				if(x_index+1 < MAP_SIZE+1 && y_index+1 < MAP_SIZE+1){
-					std::cout << "plotting trajectory" << std::endl;
-					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + (x_index+1)*cn + 0] = 0; // B
-					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + (x_index+1)*cn + 1] = 255; // G
-					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + (x_index+1)*cn + 2] = 255; // R
-				}
-
-				if(x_index-1 < MAP_SIZE+1 && y_index-1 < MAP_SIZE+1){
-					std::cout << "plotting trajectory" << std::endl;
-					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + (x_index-1)*cn + 0] = 0; // B
-					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + (x_index-1)*cn + 1] = 255; // G
-					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + (x_index-1)*cn + 2] = 255; // R
-				}
-
-				if(x_index+1 < MAP_SIZE+1 && y_index-1 < MAP_SIZE+1){
-					std::cout << "plotting trajectory" << std::endl;
-					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + (x_index+1)*cn + 0] = 0; // B
-					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + (x_index+1)*cn + 1] = 255; // G
-					Trajectory_Map_pixel_ptr[(y_index-1)*Trajectory_Map.cols*cn + (x_index+1)*cn + 2] = 255; // R
-				}
-
-				if(x_index-1 < MAP_SIZE+1 && y_index+1 < MAP_SIZE+1){
-					std::cout << "plotting trajectory" << std::endl;
-					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + (x_index-1)*cn + 0] = 0; // B
-					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + (x_index-1)*cn + 1] = 255; // G
-					Trajectory_Map_pixel_ptr[(y_index+1)*Trajectory_Map.cols*cn + (x_index-1)*cn + 2] = 255; // R
-				}
+				plotting_fat_point_on_map(this->Trajectory_Map, x_index, y_index, 255, 255, 255);
 			}
         }
+
+		// received lidar massage
+        if(this->lidar_sub->has_msg()){
+            std::cout << "got a lidar measurement" << std::endl;
+            this->Lidar_measurement = *(this->lidar_sub->take());
+            std::cout << "point_num: " << Lidar_measurement.point_num << std::endl;
+
+            float* Map_pixel_ptr = (float*)Lidar_Frame_Map.data;
+            for(int j = 0; j < LIDAR_FRAME_SIZE+1; ++j){
+                for(int k = 0; k < LIDAR_FRAME_SIZE+1; ++k){
+                    Map_pixel_ptr[j*Lidar_Frame_Map.cols + k] = 0.0;
+                }
+            }
+
+			uint8_t* Occupancy_Grid_Map_pixel_ptr = (uint8_t*)Occupancy_Grid_Map.data;
+			int cn = Occupancy_Grid_Map.channels();
+
+            for(int i = 0; i < Lidar_measurement.point_num; ++i){
+                if(Lidar_measurement.points[i].x != 0 || Lidar_measurement.points[i].y != 0 || Lidar_measurement.points[i].z != 0){
+                    if(Lidar_measurement.points[i].z <= 0.8 && Lidar_measurement.points[i].z >= -0.2){
+                        if(Lidar_measurement.points[i].x <= 20 && Lidar_measurement.points[i].x >= -20 && Lidar_measurement.points[i].y <= 20 && Lidar_measurement.points[i].y >= -20){
+                            //std::cout << "x: " << Lidar_measurement.points[i].x << std::endl;
+                            //std::cout << "y: " << Lidar_measurement.points[i].y << std::endl;
+                            //std::cout << "z: " << Lidar_measurement.points[i].z << std::endl;
+
+                            Eigen::MatrixXd x_coord = Eigen::MatrixXd::Zero(2,1);
+                            x_coord(0,0) = Lidar_measurement.points[i].x;
+		                    x_coord(1,0) = Lidar_measurement.points[i].y;
+		                    Eigen::MatrixXd x_map_frame = frame_transformation(this->mapTworld,x_coord);
+                            int x_index = int(round(x_map_frame(0,0)));
+		                    int y_index = int(round(x_map_frame(1,0)));
+
+							if(x_index >= 0 && x_index < Lidar_Frame_Map.cols && y_index >= 0 && y_index < Lidar_Frame_Map.rows){
+                            	Map_pixel_ptr[y_index*Lidar_Frame_Map.cols + x_index] = 255.0;
+							}
+
+							Eigen::MatrixXd global_lidar_point_coor = frame_transformation(this->worldTbody,x_coord);
+							Eigen::MatrixXd map_lidar_point_coor = this->mapTworld*global_lidar_point_coor;
+							x_index = int(round(map_lidar_point_coor(0,0)));
+		                    y_index = int(round(map_lidar_point_coor(1,0)));
+
+							if(x_index >= 0 && x_index < Occupancy_Grid_Map.cols && y_index >= 0 && y_index < Occupancy_Grid_Map.rows){
+                            	Occupancy_Grid_Map_pixel_ptr[y_index*Occupancy_Grid_Map.cols*cn + x_index*cn + 0] = 255; // B
+								Occupancy_Grid_Map_pixel_ptr[y_index*Occupancy_Grid_Map.cols*cn + x_index*cn + 1] = 255; // G
+								Occupancy_Grid_Map_pixel_ptr[y_index*Occupancy_Grid_Map.cols*cn + x_index*cn + 2] = 255; // R
+							}
+                        }
+                    }
+                }
+            }
+        }
+		else{ // no lidar measurement clear lidar map
+			float* Map_pixel_ptr = (float*)Lidar_Frame_Map.data;
+            for(int j = 0; j < LIDAR_FRAME_SIZE+1; ++j){
+                for(int k = 0; k < LIDAR_FRAME_SIZE+1; ++k){
+                    Map_pixel_ptr[j*Lidar_Frame_Map.cols + k] = 0.0;
+                }
+            }
+		}
 
 		mtx.unlock();
 		std::cout << "step duration: " << this->check_duration_timer.elapsed() << std::endl;
