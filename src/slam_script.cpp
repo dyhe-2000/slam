@@ -566,7 +566,7 @@ public:
 
             for(int i = 0; i < Lidar_measurement.point_num; ++i){
                 if(Lidar_measurement.points[i].x != 0 || Lidar_measurement.points[i].y != 0 || Lidar_measurement.points[i].z != 0){
-                    if(Lidar_measurement.points[i].z <= 0.8 && Lidar_measurement.points[i].z >= -0.2){
+                    if(Lidar_measurement.points[i].z <= 5 && Lidar_measurement.points[i].z >= -5){
                         if(Lidar_measurement.points[i].x <= 20 && Lidar_measurement.points[i].x >= -20 && Lidar_measurement.points[i].y <= 20 && Lidar_measurement.points[i].y >= -20){
                             //std::cout << "x: " << Lidar_measurement.points[i].x << std::endl;
                             //std::cout << "y: " << Lidar_measurement.points[i].y << std::endl;
