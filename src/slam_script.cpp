@@ -149,6 +149,7 @@ protected:
 	rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr occupancy_grid_map_pub_;
 	rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr boat_pos_global_frame_pub_; // x and y are in integer coord
 	rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr boat_pos_map_frame_pub_; // x and y are in integer coord
+	rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr map_origin_lat_lon_pub_;
         
 	// timer
 	rclcpp::TimerBase::SharedPtr map_sending_timer_;
@@ -176,6 +177,7 @@ protected:
 	long long int step_counter;
 	geometry_msgs::msg::Vector3 boat_pos_global_frame; 
 	geometry_msgs::msg::Vector3 boat_pos_map_frame; 
+	geometry_msgs::msg::Vector3 map_origin_lat_lon; 
 	GpsPosition origin;
 	bool origin_is_set;
 
@@ -238,6 +240,11 @@ public:
 		boat_pos_map_frame.y = 0;
 		boat_pos_map_frame.z = 0;
 
+		// initialize map_origin_lon_lat
+		map_origin_lat_lon.x = 0;
+		map_origin_lat_lon.y = 0;
+		map_origin_lat_lon.z = 0;
+
 		// initialize x
         this->x_tpre(0,0) = 0;
         this->x_tpre(1,0) = 0;
@@ -293,6 +300,7 @@ public:
 		this->occupancy_grid_map_pub_ = this->create_publisher<sensor_msgs::msg::Image>("slam_occupancy_grid_map", 10);
 		this->boat_pos_global_frame_pub_ = this->create_publisher<geometry_msgs::msg::Vector3>("boat_pos_global_frame", 10);
 		this->boat_pos_map_frame_pub_ = this->create_publisher<geometry_msgs::msg::Vector3>("boat_pos_map_frame", 10);
+		this->map_origin_lat_lon_pub_ = this->create_publisher<geometry_msgs::msg::Vector3>("map_origin_lat_lon", 10);
 		
 		// initialize the buffer subscribers
 		subscribe_from(this, lidar_sub, "/livox/lidar");
@@ -366,6 +374,9 @@ public:
 		// publish x and y coord in map
 		this->boat_pos_global_frame_pub_->publish(this->boat_pos_global_frame);
 		this->boat_pos_map_frame_pub_->publish(this->boat_pos_map_frame);
+		
+		// publish map origin lat and lon repeatedly
+		this->map_origin_lat_lon_pub_->publish(this->map_origin_lat_lon);
 		mtx.unlock();
     }
 
@@ -462,6 +473,10 @@ public:
 				this->origin.latitude = lat;
 				this->origin.longitude = lon;
 				this->origin.altitude = 0;
+
+				// set origin lat and lon for publishing
+				this->map_origin_lat_lon.x = lat;
+				this->map_origin_lat_lon.y = lon;
 
 				this->x_tpre(0,0) = 0;
 				this->x_tpre(1,0) = 0;
