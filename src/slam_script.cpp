@@ -147,7 +147,8 @@ protected:
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr lidar_frame_map_pub_;
 	rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr trajectory_map_pub_;
 	rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr occupancy_grid_map_pub_;
-	rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr coord_pub_; // x and y are in integer coord
+	rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr boat_pos_global_frame_pub_; // x and y are in integer coord
+	rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr boat_pos_map_frame_pub_; // x and y are in integer coord
         
 	// timer
 	rclcpp::TimerBase::SharedPtr map_sending_timer_;
@@ -173,7 +174,8 @@ protected:
 	Eigen::MatrixXd body_cross_body_frame = Eigen::MatrixXd::Zero(2,200); // x,y
 	rclcpp::Time previous_read_imu_message_time_stamp;
 	long long int step_counter;
-	geometry_msgs::msg::Vector3 coord_message; 
+	geometry_msgs::msg::Vector3 boat_pos_global_frame; 
+	geometry_msgs::msg::Vector3 boat_pos_map_frame; 
 	GpsPosition origin;
 	bool origin_is_set;
 
@@ -226,10 +228,15 @@ public:
 			body_cross_body_frame(1,i) = (i-100)*0.01;
 		}
 
-		// initialize coord_message
-		coord_message.x = 0;
-		coord_message.y = 0;
-		coord_message.z = 0;
+		// initialize boat_pos_global_frame
+		boat_pos_global_frame.x = 0;
+		boat_pos_global_frame.y = 0;
+		boat_pos_global_frame.z = 0;
+
+		// initialize boat_pos_map_frame
+		boat_pos_map_frame.x = 0;
+		boat_pos_map_frame.y = 0;
+		boat_pos_map_frame.z = 0;
 
 		// initialize x
         this->x_tpre(0,0) = 0;
@@ -284,7 +291,8 @@ public:
 		this->lidar_frame_map_pub_ = this->create_publisher<sensor_msgs::msg::Image>("lidar_frame_map", 10);
 		this->trajectory_map_pub_ = this->create_publisher<sensor_msgs::msg::Image>("slam_trajectory_map", 10);
 		this->occupancy_grid_map_pub_ = this->create_publisher<sensor_msgs::msg::Image>("slam_occupancy_grid_map", 10);
-		this->coord_pub_ = this->create_publisher<geometry_msgs::msg::Vector3>("slam_coord", 10);
+		this->boat_pos_global_frame_pub_ = this->create_publisher<geometry_msgs::msg::Vector3>("boat_pos_global_frame", 10);
+		this->boat_pos_map_frame_pub_ = this->create_publisher<geometry_msgs::msg::Vector3>("boat_pos_map_frame", 10);
 		
 		// initialize the buffer subscribers
 		subscribe_from(this, lidar_sub, "/livox/lidar");
@@ -356,7 +364,8 @@ public:
 
 
 		// publish x and y coord in map
-		coord_pub_->publish(this->coord_message);
+		this->boat_pos_global_frame_pub_->publish(this->boat_pos_global_frame);
+		this->boat_pos_map_frame_pub_->publish(this->boat_pos_map_frame);
 		mtx.unlock();
     }
 
@@ -469,6 +478,15 @@ public:
 				int y_index = int(round(x_map_frame(1,0)));
 
 				plotting_point_on_map(this->Trajectory_Map, x_index, y_index, 255, 255, 255);
+
+				// updating current boat pos
+				this->boat_pos_global_frame.x = 0;
+				this->boat_pos_global_frame.y = 0;
+				this->boat_pos_global_frame.z = 0;
+
+				this->boat_pos_map_frame.x = x_index;
+				this->boat_pos_map_frame.y = y_index;
+				this->boat_pos_map_frame.z = 0;
 			}
 			else{
 				GpsPosition target;
@@ -493,6 +511,23 @@ public:
 				Eigen::MatrixXd cross_map_coor_pre = frame_transformation(worldTbody_pre, this->body_cross_body_frame);
 				Eigen::MatrixXd cross_map_coor_now_map = this->mapTworld*cross_map_coor_now;
 				Eigen::MatrixXd cross_map_coor_pre_map = this->mapTworld*cross_map_coor_pre;
+
+				// calculating pos in map frame
+				Eigen::MatrixXd x_tnow_2vec = Eigen::MatrixXd::Zero(2,1);
+				x_tnow_2vec(0,0) = this->x_tnow(0,0);
+				x_tnow_2vec(1,0) = this->x_tnow(1,0);
+				Eigen::MatrixXd x_map_frame = frame_transformation(this->mapTworld,x_tnow_2vec);
+				int map_x_index = int(round(x_map_frame(0,0)));
+				int map_y_index = int(round(x_map_frame(1,0)));
+
+				// updating current boat pos
+				this->boat_pos_global_frame.x = this->x_tnow(0,0);
+				this->boat_pos_global_frame.y = this->x_tnow(1,0);
+				this->boat_pos_global_frame.z = this->x_tnow(2,0);
+
+				this->boat_pos_map_frame.x = map_x_index;
+				this->boat_pos_map_frame.y = map_y_index;
+				this->boat_pos_map_frame.z = this->x_tnow(2,0);
 				
 				// erasing pre cross
 				for(int i = 100; i < cross_map_coor_pre_map.cols(); ++i){
