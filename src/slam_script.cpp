@@ -618,49 +618,51 @@ public:
                 if(Lidar_measurement.points[i].x != 0 || Lidar_measurement.points[i].y != 0 || Lidar_measurement.points[i].z != 0){
                     if(Lidar_measurement.points[i].z <= 10 && Lidar_measurement.points[i].z >= -5){
                         if(Lidar_measurement.points[i].x <= 20 && Lidar_measurement.points[i].x >= -20 && Lidar_measurement.points[i].y <= 20 && Lidar_measurement.points[i].y >= -20){
-                            //std::cout << "x: " << Lidar_measurement.points[i].x << std::endl;
-                            //std::cout << "y: " << Lidar_measurement.points[i].y << std::endl;
-                            //std::cout << "z: " << Lidar_measurement.points[i].z << std::endl;
+							if((Lidar_measurement.points[i].x*Lidar_measurement.points[i].x + Lidar_measurement.points[i].y*Lidar_measurement.points[i].y) >= 2.25){
+								//std::cout << "x: " << Lidar_measurement.points[i].x << std::endl;
+								//std::cout << "y: " << Lidar_measurement.points[i].y << std::endl;
+								//std::cout << "z: " << Lidar_measurement.points[i].z << std::endl;
 
-                            Eigen::MatrixXd x_coord = Eigen::MatrixXd::Zero(2,1);
-                            x_coord(0,0) = Lidar_measurement.points[i].x;
-		                    x_coord(1,0) = Lidar_measurement.points[i].y;
-		                    Eigen::MatrixXd x_map_frame = frame_transformation(this->mapTworld,x_coord);
-                            int x_index = int(round(x_map_frame(0,0)));
-		                    int y_index = int(round(x_map_frame(1,0)));
+								Eigen::MatrixXd x_coord = Eigen::MatrixXd::Zero(2,1);
+								x_coord(0,0) = Lidar_measurement.points[i].x;
+								x_coord(1,0) = Lidar_measurement.points[i].y;
+								Eigen::MatrixXd x_map_frame = frame_transformation(this->mapTworld,x_coord);
+								int x_index = int(round(x_map_frame(0,0)));
+								int y_index = int(round(x_map_frame(1,0)));
 
-							if(x_index >= 0 && x_index < Lidar_Frame_Map.cols && y_index >= 0 && y_index < Lidar_Frame_Map.rows){
-                            	Map_pixel_ptr[y_index*Lidar_Frame_Map.cols + x_index] = 255.0;
-							}
-
-							Eigen::MatrixXd global_lidar_point_coor = frame_transformation(this->worldTbody,x_coord);
-							Eigen::MatrixXd map_lidar_point_coor = this->mapTworld*global_lidar_point_coor;
-							x_index = int(round(map_lidar_point_coor(0,0)));
-		                    y_index = int(round(map_lidar_point_coor(1,0)));
-
-							// using bresenham to compute boat map pos to each lidar map pos
-							std::pair<std::pair<double, double>, std::pair<double, double>> theData;
-							theData.first.first = x_index;
-							theData.first.second = y_index;
-							theData.second.first = this->boat_pos_map_frame.x;
-							theData.second.second = this->boat_pos_map_frame.y;
-
-							std::vector<std::pair<int, int>> theVector;
-
-							bresenham2d(theData, &theVector);
-
-							for(int j = 0; j < theVector.size(); ++j){
-								if(theVector[j].first >= 0 && theVector[j].first < Occupancy_Grid_Map.cols && theVector[j].second >= 0 && theVector[j].second < Occupancy_Grid_Map.rows){
-									//Occupancy_Grid_Map_pixel_ptr[theVector[j].second*Occupancy_Grid_Map.cols*cn + theVector[j].first*cn + 0] = 0;
-									//Occupancy_Grid_Map_pixel_ptr[theVector[j].second*Occupancy_Grid_Map.cols*cn + theVector[j].first*cn + 1] = 0;
-									//Occupancy_Grid_Map_pixel_ptr[theVector[j].second*Occupancy_Grid_Map.cols*cn + theVector[j].first*cn + 2] = 0;
+								if(x_index >= 0 && x_index < Lidar_Frame_Map.cols && y_index >= 0 && y_index < Lidar_Frame_Map.rows){
+									Map_pixel_ptr[y_index*Lidar_Frame_Map.cols + x_index] = 255.0;
 								}
-							}
 
-							if(x_index >= 0 && x_index < Occupancy_Grid_Map.cols && y_index >= 0 && y_index < Occupancy_Grid_Map.rows){
-                            	Occupancy_Grid_Map_pixel_ptr[y_index*Occupancy_Grid_Map.cols*cn + x_index*cn + 0] = 255; // B
-								Occupancy_Grid_Map_pixel_ptr[y_index*Occupancy_Grid_Map.cols*cn + x_index*cn + 1] = 255; // G
-								Occupancy_Grid_Map_pixel_ptr[y_index*Occupancy_Grid_Map.cols*cn + x_index*cn + 2] = 255; // R
+								Eigen::MatrixXd global_lidar_point_coor = frame_transformation(this->worldTbody,x_coord);
+								Eigen::MatrixXd map_lidar_point_coor = this->mapTworld*global_lidar_point_coor;
+								x_index = int(round(map_lidar_point_coor(0,0)));
+								y_index = int(round(map_lidar_point_coor(1,0)));
+
+								// using bresenham to compute boat map pos to each lidar map pos
+								std::pair<std::pair<double, double>, std::pair<double, double>> theData;
+								theData.first.first = x_index;
+								theData.first.second = y_index;
+								theData.second.first = this->boat_pos_map_frame.x;
+								theData.second.second = this->boat_pos_map_frame.y;
+
+								std::vector<std::pair<int, int>> theVector;
+
+								bresenham2d(theData, &theVector);
+
+								for(int j = 0; j < theVector.size(); ++j){
+									if(theVector[j].first >= 0 && theVector[j].first < Occupancy_Grid_Map.cols && theVector[j].second >= 0 && theVector[j].second < Occupancy_Grid_Map.rows){
+										//Occupancy_Grid_Map_pixel_ptr[theVector[j].second*Occupancy_Grid_Map.cols*cn + theVector[j].first*cn + 0] = 0;
+										//Occupancy_Grid_Map_pixel_ptr[theVector[j].second*Occupancy_Grid_Map.cols*cn + theVector[j].first*cn + 1] = 0;
+										//Occupancy_Grid_Map_pixel_ptr[theVector[j].second*Occupancy_Grid_Map.cols*cn + theVector[j].first*cn + 2] = 0;
+									}
+								}
+
+								if(x_index >= 0 && x_index < Occupancy_Grid_Map.cols && y_index >= 0 && y_index < Occupancy_Grid_Map.rows){
+									Occupancy_Grid_Map_pixel_ptr[y_index*Occupancy_Grid_Map.cols*cn + x_index*cn + 0] = 255; // B
+									Occupancy_Grid_Map_pixel_ptr[y_index*Occupancy_Grid_Map.cols*cn + x_index*cn + 1] = 255; // G
+									Occupancy_Grid_Map_pixel_ptr[y_index*Occupancy_Grid_Map.cols*cn + x_index*cn + 2] = 255; // R
+								}
 							}
                         }
                     }
