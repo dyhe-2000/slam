@@ -201,7 +201,7 @@ public:
 		// initialize mapTworld
 		mapTworld(0,0) = 1/Map_resolution;
 		mapTworld(1,1) = 1/Map_resolution;
-		mapTworld(2,2) = 1;
+		mapTworld(2,2) = 1/Map_resolution;
 		mapTworld(3,3) = 1;
 		mapTworld(0,3) = MAP_SIZE/2;
 		mapTworld(1,3) = MAP_SIZE/2;
@@ -611,7 +611,7 @@ public:
         }
 
 		// received lidar massage
-        if(this->lidar_sub->has_msg()){
+        if(this->lidar_sub->has_msg() && this->origin_is_set){
             std::cout << "got a lidar measurement" << std::endl;
             this->Lidar_measurement = *(this->lidar_sub->take());
             std::cout << "point_num: " << Lidar_measurement.point_num << std::endl;
