@@ -170,6 +170,7 @@ protected:
 	Eigen::MatrixXd x_tpre = Eigen::MatrixXd::Zero(3,NUM_PARTICLES); // x,y,theta in world frame, initially 0
 	Eigen::MatrixXd x_tnow = Eigen::MatrixXd::Zero(3,NUM_PARTICLES); // x,y,theta in world frame, initially 0
 	Eigen::MatrixXd mapTworld = Eigen::MatrixXd::Zero(4,4);
+	Eigen::MatrixXd lidarmapTworld = Eigen::MatrixXd::Zero(4,4);
 	Eigen::MatrixXd bodyTlidar = Eigen::MatrixXd::Zero(4,4);
 	Eigen::MatrixXd worldTbody = Eigen::MatrixXd::Zero(4,4);
 	Eigen::MatrixXd body_cross_body_frame = Eigen::MatrixXd::Zero(2,200); // x,y
@@ -205,6 +206,15 @@ public:
 		mapTworld(0,3) = MAP_SIZE/2;
 		mapTworld(1,3) = MAP_SIZE/2;
 		std::cout << "mapTworld: \n" << mapTworld << std::endl;
+
+		// initialize lidarmapTworld
+		lidarmapTworld(0,0) = 1/Map_resolution;
+		lidarmapTworld(1,1) = 1/Map_resolution;
+		lidarmapTworld(2,2) = 1;
+		lidarmapTworld(3,3) = 1;
+		lidarmapTworld(0,3) = LIDAR_FRAME_SIZE/2;
+		lidarmapTworld(1,3) = LIDAR_FRAME_SIZE/2;
+		std::cout << "lidarmapTworld: \n" << lidarmapTworld << std::endl;
 
 		// initialize bodyTlidar
 		bodyTlidar(0,0) = cos(3.1415926535897932384626433832795);
@@ -480,10 +490,10 @@ public:
 
 				this->x_tpre(0,0) = 0;
 				this->x_tpre(1,0) = 0;
-				this->x_tpre(2,0) = 0;
+				this->x_tpre(2,0) = ((90.0-hdg)/180.0)*M_PI;
 				this->x_tnow(0,0) = 0;
 				this->x_tnow(1,0) = 0;
-				this->x_tnow(2,0) = 0;
+				this->x_tnow(2,0) = ((90.0-hdg)/180.0)*M_PI;
 
 				Eigen::MatrixXd x_coord = Eigen::MatrixXd::Zero(2,1);
 				x_coord(0,0) = 0.0;
@@ -492,16 +502,18 @@ public:
 				int x_index = int(round(x_map_frame(0,0)));
 				int y_index = int(round(x_map_frame(1,0)));
 
+				this->worldTbody = calc_worldTbody(this->x_tnow);
+
 				plotting_point_on_map(this->Trajectory_Map, x_index, y_index, 255, 255, 255);
 
 				// updating current boat pos
 				this->boat_pos_global_frame.x = 0;
 				this->boat_pos_global_frame.y = 0;
-				this->boat_pos_global_frame.z = 0;
+				this->boat_pos_global_frame.z = ((90.0-hdg)/180.0)*M_PI;
 
 				this->boat_pos_map_frame.x = x_index;
 				this->boat_pos_map_frame.y = y_index;
-				this->boat_pos_map_frame.z = 0;
+				this->boat_pos_map_frame.z = ((90.0-hdg)/180.0)*M_PI;
 			}
 			else{
 				GpsPosition target;
@@ -627,7 +639,7 @@ public:
 								Eigen::MatrixXd x_coord = Eigen::MatrixXd::Zero(2,1);
 								x_coord(0,0) = Lidar_measurement.points[i].x;
 								x_coord(1,0) = Lidar_measurement.points[i].y;
-								Eigen::MatrixXd x_map_frame = frame_transformation(this->mapTworld,x_coord);
+								Eigen::MatrixXd x_map_frame = frame_transformation(this->lidarmapTworld,x_coord);
 								int x_index = int(round(x_map_frame(0,0)));
 								int y_index = int(round(x_map_frame(1,0)));
 
