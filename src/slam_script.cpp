@@ -36,7 +36,7 @@
 using std::placeholders::_1;
 std::mutex mtx;
 
-#define MAP_SIZE 1400 // will +1 for making origin
+#define MAP_SIZE 1800 // will +1 for making origin
 #define LIDAR_FRAME_SIZE 800 // will +1 for making origin
 #define MAP_RESOLUTION 0.05
 #define NUM_PARTICLES 1 //175
