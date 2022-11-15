@@ -144,8 +144,8 @@ Eigen::MatrixXd calc_worldTbody(Eigen::MatrixXd& x){
 class slam_node : public rclcpp::Node{
 protected:
 	// publisher
-    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr lidar_frame_map_pub_;
-	rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr trajectory_map_pub_;
+    //rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr lidar_frame_map_pub_;
+	//rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr trajectory_map_pub_;
 	rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr occupancy_grid_map_pub_;
 	rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr boat_pos_global_frame_pub_; // x and y are in integer coord
 	rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr boat_pos_map_frame_pub_; // x and y are in integer coord
@@ -305,8 +305,8 @@ public:
 		mtx.unlock();
 
 		// initialize the member publisher
-		this->lidar_frame_map_pub_ = this->create_publisher<sensor_msgs::msg::Image>("lidar_frame_map", 10);
-		this->trajectory_map_pub_ = this->create_publisher<sensor_msgs::msg::Image>("slam_trajectory_map", 10);
+		//this->lidar_frame_map_pub_ = this->create_publisher<sensor_msgs::msg::Image>("lidar_frame_map", 10);
+		//this->trajectory_map_pub_ = this->create_publisher<sensor_msgs::msg::Image>("slam_trajectory_map", 10);
 		this->occupancy_grid_map_pub_ = this->create_publisher<sensor_msgs::msg::Image>("slam_occupancy_grid_map", 10);
 		this->boat_pos_global_frame_pub_ = this->create_publisher<geometry_msgs::msg::Vector3>("boat_pos_global_frame", 10);
 		this->boat_pos_map_frame_pub_ = this->create_publisher<geometry_msgs::msg::Vector3>("boat_pos_map_frame", 10);
@@ -319,13 +319,13 @@ public:
 		subscribe_from(this, heading_sub, "/wamv/sensors/gps/hdg");
 
 		// project first lidar measurement, in this case wTb is identity matrix because initially body frame is world frame
-		this->map_sending_timer_ = this->create_wall_timer(std::chrono::milliseconds((uint32_t)(1.0/this->map_publisher_freq*1000)), std::bind(&slam_node::publish_map, this));
+		this->map_sending_timer_ = this->create_wall_timer(std::chrono::milliseconds((uint32_t)(300)), std::bind(&slam_node::publish_map, this));
 		// initialize the timer
 		this->step_timer_ = rclcpp::create_timer(this, get_clock(), std::chrono::duration<float>(this->dt_), [this] {step();});
 	}
 
 	~slam_node(){ // destructor save the occupancy map and log odds map
-
+		cv::imwrite("Map.png", this->Occupancy_Grid_Map);
 	}
 
     void publish_map() { // running repeatedly with the timer set frequency
@@ -354,7 +354,7 @@ public:
 		image_msg->is_bigendian = false;
 		image_msg->step = static_cast<sensor_msgs::msg::Image::_step_type>(single_channel_image.step);
 		image_msg->data.assign(single_channel_image.datastart,single_channel_image.dataend);
-		lidar_frame_map_pub_->publish(std::move(image_msg));
+		//lidar_frame_map_pub_->publish(std::move(image_msg));
 
 		//this->Trajectory_Map; // 8UC3
 		sensor_msgs::msg::Image::UniquePtr trajectory_map_msg(new sensor_msgs::msg::Image());
@@ -366,9 +366,9 @@ public:
 		trajectory_map_msg->is_bigendian = false;
 		trajectory_map_msg->step = static_cast<sensor_msgs::msg::Image::_step_type>(this->Trajectory_Map.step);
 		trajectory_map_msg->data.assign(this->Trajectory_Map.datastart,this->Trajectory_Map.dataend);
-		trajectory_map_pub_->publish(std::move(trajectory_map_msg));
+		//trajectory_map_pub_->publish(std::move(trajectory_map_msg));
 
-		//this->Trajectory_Map; // 8UC3
+		//this->Occupancy_Grid_Map; // 8UC3
 		sensor_msgs::msg::Image::UniquePtr occupancy_grid_map_msg(new sensor_msgs::msg::Image());
 		stamp = now();
 		occupancy_grid_map_msg->header.stamp = stamp;
