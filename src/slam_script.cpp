@@ -319,7 +319,7 @@ public:
 		subscribe_from(this, heading_sub, "/wamv/sensors/gps/hdg");
 
 		// project first lidar measurement, in this case wTb is identity matrix because initially body frame is world frame
-		this->map_sending_timer_ = this->create_wall_timer(std::chrono::milliseconds((uint32_t)(300)), std::bind(&slam_node::publish_map, this));
+		this->map_sending_timer_ = this->create_wall_timer(std::chrono::milliseconds((uint32_t)(500)), std::bind(&slam_node::publish_map, this));
 		// initialize the timer
 		this->step_timer_ = rclcpp::create_timer(this, get_clock(), std::chrono::duration<float>(this->dt_), [this] {step();});
 	}
